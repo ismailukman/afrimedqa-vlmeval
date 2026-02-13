@@ -1,0 +1,20 @@
+{
+    "model": {
+        "gemma-3-4b-it": {
+            "class": "Gemma3", 
+            "model_path": "google/gemma-3-4b-it",
+            "device_map": "auto",
+            "use_vllm": true
+        }
+    },
+    "judge": {
+        "model": "gemini-3.0-pro",
+        "temperature": 0
+    },
+    "data": {
+        "ENGLISH_TEST__Sheet1": {
+            "class": "AfrimedShortQA",
+            "dataset": "ENGLISH_TEST__Sheet1"
+        }
+    }
+}

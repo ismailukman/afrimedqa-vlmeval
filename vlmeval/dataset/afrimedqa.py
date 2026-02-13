@@ -85,9 +85,12 @@ class AfrimedQA(ImageMCQDataset):
         data = data.sort_values(by='index')
 
         # Keep MCQs if dataset includes question_type
-        if 'split' in data.columns and 'question_type' in data.columns:
-            data = data[data['question_type'] == 'MCQ']
-
+        if 'question_type' in data.columns:
+            mcq_data = data[data['question_type'] == 'MCQ']
+            saq_data = data[data['question_type'] == 'SAQ']
+        else:
+                mcq_data = data
+                saq_data = pd.DataFrame()
         # Ensure predictions are strings
         data['prediction'] = [str(x) for x in data['prediction']]
 

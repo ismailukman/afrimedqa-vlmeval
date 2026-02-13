@@ -226,40 +226,58 @@ def main():
         if not tsv_files:
             raise FileNotFoundError(f"No TSV files found in directory: {tsv_dir}")
     
-        args.data = []
-        for f in tsv_files:
-            dataset_name = os.path.splitext(f)[0]  # e.g., "YORUBA_TEST_Sheet1"
-            dataset_path = os.path.abspath(os.path.join(tsv_dir, f))
-        
-            # Dynamically register this dataset with AfrimedQA
-            from vlmeval.dataset.afrimedqa import AfrimedQA
-            AfrimedQA.DATASET_URL[dataset_name] = dataset_path
-            AfrimedQA.DATASET_MD5[dataset_name] = ""
-        
-            args.data.append(dataset_name)
-            discovered_names.append(dataset_name)
-    
-        print(f"Found {len(args.data)} datasets in {tsv_dir}:")
-        for d in args.data:
-            print(f"  - {d}")
+        if args.config is None:
+            args.data = []
 
         from vlmeval.dataset.afrimedqa import AfrimedQA
-        if AfrimedQA not in DATASET_CLASSES:
-            # Put first so it wins lookup before generic fallbacks
-            DATASET_CLASSES.insert(0, AfrimedQA)
+        from vlmeval.dataset.afrimedqa_shortqa import AfrimedShortQA
 
-        # Teach AfrimedQA to report these names as supported
-        if not hasattr(AfrimedQA, "_extra_datasets"):
-            AfrimedQA._extra_datasets = set()
-        AfrimedQA._extra_datasets.update(discovered_names)
+        import vlmeval.dataset
+        setattr(vlmeval.dataset, 'AfrimedQA', AfrimedQA)
+        setattr(vlmeval.dataset, 'AfrimedShortQA', AfrimedShortQA)
 
+        for f in tsv_files:
+            dataset_name = os.path.splitext(f)[0] 
+            dataset_path = os.path.abspath(os.path.join(tsv_dir, f))
         
-        def _supported_datasets(cls):
-            base = ['AfrimedQA']
-            extra = sorted(list(getattr(cls, "_extra_datasets", [])))
-            return base + extra
+            # register AfrimedQA dataset (MCQ)
+            AfrimedQA.DATASET_URL[dataset_name] = dataset_path
+            AfrimedQA.DATASET_MD5[dataset_name] = ""
 
-        AfrimedQA.supported_datasets = classmethod(_supported_datasets)
+            # register AfrimedShortQA dataset (Short Answer)
+            AfrimedShortQA.DATASET_URL[dataset_name] = dataset_path
+            AfrimedShortQA.DATASET_MD5[dataset_name] = ""
+
+            if args.config is None:
+                args.data.append(dataset_name)
+            
+            discovered_names.append(dataset_name)
+
+        if args.config is None:
+            print(f"Found {len(args.data)} datasets in {tsv_dir}:")
+            for d in args.data:
+                print(f"  - {d}")
+        else:
+            print(f"Registered {len(discovered_names)} datasets from {tsv_dir} for Config usage.")
+
+        custom_classes = [AfrimedQA, AfrimedShortQA]
+        for cls in custom_classes:
+            # 1. Register in global DATASET_CLASSES (Prepend for lookup priority)
+            if cls not in DATASET_CLASSES:
+                DATASET_CLASSES.insert(0, cls)
+
+            # 2. Inject dynamic dataset names into the class
+            if not hasattr(cls, "_extra_datasets"):
+                cls._extra_datasets = set()
+            cls._extra_datasets.update(discovered_names)
+
+            # 3. Patch the 'supported_datasets' method to include the new names
+            def _dynamic_supported_datasets(cls_obj):
+                base = [cls_obj.__name__]
+                extra = sorted(list(getattr(cls_obj, "_extra_datasets", [])))
+                return base + extra
+            
+            cls.supported_datasets = classmethod(_dynamic_supported_datasets)
 
     if args.config is not None:
         assert args.data is None and args.model is None, '--data and --model should not be set when using --config'
