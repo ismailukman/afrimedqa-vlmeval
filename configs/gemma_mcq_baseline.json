@@ -1,15 +1,14 @@
 {
     "model": {
-        "medgemma-4b-it": {
-            "class": "Gemma3", 
-            "model_path": "google/medgemma-4b-it",
+        "Gemma3-4B": {
+            "class": "Gemma3",
+            "model_path": "google/gemma-3-4b-it",
             "use_vllm": true
         }
     },
-
     "data": {
         "ENGLISH_TEST__Sheet1": {
-            "class": "AfrimedShortQA",
+            "class": "AfrimedQA",
             "dataset": "ENGLISH_TEST__Sheet1"
         }
     }

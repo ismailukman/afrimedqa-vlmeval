@@ -2,9 +2,6 @@ import json
 import os
 import subprocess
 from functools import partial
-import torch._dynamo
-torch._dynamo.config.cache_size_limit = 128
-
 
 
 # GET the number of GPUs on the node without importing libs like torch
@@ -44,7 +41,7 @@ if LOCAL_WORLD_SIZE > 1 and len(GPU_LIST):
 
 from vlmeval.config import supported_VLM
 from vlmeval.dataset.video_dataset_config import supported_video_datasets
-from vlmeval.dataset import build_dataset,  DATASET_CLASSES
+from vlmeval.dataset import build_dataset
 from vlmeval.inference import infer_data_job
 from vlmeval.inference_video import infer_data_job_video
 from vlmeval.inference_mt import infer_data_job_mt
@@ -178,10 +175,8 @@ You can launch the evaluation by setting either --data and --model or --config.
     parser.add_argument('--config', type=str, help='Path to the Config Json File')
     # Work Dir
     parser.add_argument('--work-dir', type=str, default='./outputs', help='select the output directory')
-    parser.add_argument('--data-dir', type=str, default=None,
-                    help='Directory containing TSV files to evaluate (e.g., ./test_files)')
     # Infer + Eval or Infer Only
-    parser.add_argument('--mode', type=str, default='all', choices=['all', 'infer'])
+    parser.add_argument('--mode', type=str, default='all', choices=['all', 'infer', 'eval'])
     # API Kwargs, Apply to API VLMs and Judge API LLMs
     parser.add_argument('--api-nproc', type=int, default=4, help='Parallel API calling')
     parser.add_argument('--retry', type=int, default=None, help='retry numbers for API VLMs')
@@ -196,9 +191,10 @@ You can launch the evaluation by setting either --data and --model or --config.
     # Reuse: will reuse the existing prediction files
     parser.add_argument('--reuse', action='store_true')
     # Reuse-aux: if set, when reuse is True, will also reuse the auxiliary evaluation files
-    parser.add_argument('--reuse-aux', type=bool, default=True, help='reuse auxiliary evaluation files')
+    parser.add_argument('--reuse-aux', type=int, default=True, help='reuse auxiliary evaluation files')
     parser.add_argument(
         '--use-vllm', action='store_true', help='use vllm to generate, the flag is only supported in Llama4 for now')
+    parser.add_argument('--use-verifier', action='store_true', help='use verifier to evaluate')
 
     args = parser.parse_args()
     return args
@@ -207,78 +203,7 @@ You can launch the evaluation by setting either --data and --model or --config.
 def main():
     logger = get_logger('RUN')
     args = parse_args()
-    
-    if 'LMUData' not in os.environ:
-        if args.data_dir:
-            os.environ['LMUData'] = os.path.abspath(args.data_dir)
-        else:
-            os.environ['LMUData'] = os.getcwd()
-        if RANK == 0:
-            logger.info(f"LMUData env var not set. Automatically set to: {os.environ['LMUData']}")
-    
     use_config, cfg = False, None
-
-    # if --data-dir is set, dynamically register all tsv files in the directory as AfrimedQA test datasets
-    discovered_names = []
-    if args.data_dir is not None:
-        tsv_dir = args.data_dir
-        tsv_files = [f for f in os.listdir(tsv_dir) if f.endswith('.tsv')]
-        if not tsv_files:
-            raise FileNotFoundError(f"No TSV files found in directory: {tsv_dir}")
-    
-        if args.config is None:
-            args.data = []
-
-        from vlmeval.dataset.afrimedqa import AfrimedQA
-        from vlmeval.dataset.afrimedqa_shortqa import AfrimedShortQA
-
-        import vlmeval.dataset
-        setattr(vlmeval.dataset, 'AfrimedQA', AfrimedQA)
-        setattr(vlmeval.dataset, 'AfrimedShortQA', AfrimedShortQA)
-
-        for f in tsv_files:
-            dataset_name = os.path.splitext(f)[0] 
-            dataset_path = os.path.abspath(os.path.join(tsv_dir, f))
-        
-            # register AfrimedQA dataset (MCQ)
-            AfrimedQA.DATASET_URL[dataset_name] = dataset_path
-            AfrimedQA.DATASET_MD5[dataset_name] = ""
-
-            # register AfrimedShortQA dataset (Short Answer)
-            AfrimedShortQA.DATASET_URL[dataset_name] = dataset_path
-            AfrimedShortQA.DATASET_MD5[dataset_name] = ""
-
-            if args.config is None:
-                args.data.append(dataset_name)
-            
-            discovered_names.append(dataset_name)
-
-        if args.config is None:
-            print(f"Found {len(args.data)} datasets in {tsv_dir}:")
-            for d in args.data:
-                print(f"  - {d}")
-        else:
-            print(f"Registered {len(discovered_names)} datasets from {tsv_dir} for Config usage.")
-
-        custom_classes = [AfrimedQA, AfrimedShortQA]
-        for cls in custom_classes:
-            # 1. Register in global DATASET_CLASSES (Prepend for lookup priority)
-            if cls not in DATASET_CLASSES:
-                DATASET_CLASSES.insert(0, cls)
-
-            # 2. Inject dynamic dataset names into the class
-            if not hasattr(cls, "_extra_datasets"):
-                cls._extra_datasets = set()
-            cls._extra_datasets.update(discovered_names)
-
-            # 3. Patch the 'supported_datasets' method to include the new names
-            def _dynamic_supported_datasets(cls_obj):
-                base = [cls_obj.__name__]
-                extra = sorted(list(getattr(cls_obj, "_extra_datasets", [])))
-                return base + extra
-            
-            cls.supported_datasets = classmethod(_dynamic_supported_datasets)
-
     if args.config is not None:
         assert args.data is None and args.model is None, '--data and --model should not be set when using --config'
         use_config, cfg = True, load(args.config)
@@ -346,7 +271,8 @@ def main():
                 dist.barrier()
 
             try:
-                result_file_base = f'{model_name}_{dataset_name}.xlsx'
+                pred_format = get_pred_file_format()
+                result_file_base = f'{model_name}_{dataset_name}.{pred_format}'
 
                 if use_config:
                     if WORLD_SIZE > 1:
@@ -357,7 +283,7 @@ def main():
                     if dataset is None:
                         logger.error(f'Dataset {dataset_name} is not valid, will be skipped. ')
                         continue
-                else: # non config datasets
+                else:
                     dataset_kwargs = {}
                     if dataset_name in ['MMLongBench_DOC', 'DUDE', 'DUDE_MINI', 'SLIDEVQA', 'SLIDEVQA_MINI']:
                         dataset_kwargs['model'] = model_name
@@ -374,48 +300,13 @@ def main():
                         continue
 
                 # Handling Multi-Turn Dataset
-                if dataset.TYPE == 'MT':
-                    result_file_base = result_file_base.replace('.xlsx', '.tsv')
-
                 result_file = osp.join(pred_root, result_file_base)
-
                 # Reuse the previous prediction file if exists
                 if RANK == 0 and len(prev_pred_roots):
-                    prev_result_files = []
-                    prev_pkl_file_list = []
-                    for root in prev_pred_roots[::-1]:
-                        if osp.exists(osp.join(root, result_file_base)):
-                            if args.reuse_aux:
-                                prev_result_files = fetch_aux_files(osp.join(root, result_file_base))
-                            else:
-                                prev_result_files = [osp.join(root, result_file_base)]
-                            break
-                        elif commit_id in root and len(ls(root)) and root != pred_root:
-                            temp_files = ls(root, match=[dataset_name, '.pkl'])
-                            if len(temp_files):
-                                prev_pkl_file_list.extend(temp_files)
-                                break
-                    if not args.reuse:
-                        prev_result_files = []
-                        prev_pkl_file_list = []
-                    if len(prev_result_files):
-                        for prev_result_file in prev_result_files:
-                            src = prev_result_file
-                            tgt = osp.join(pred_root, osp.basename(src))
-                            if not osp.exists(tgt):
-                                shutil.copy(src, tgt)
-                                logger.info(f'--reuse is set, will reuse the prediction file {src}.')
-                            else:
-                                logger.warning(f'File already exists: {tgt}')
-
-                    elif len(prev_pkl_file_list):
-                        for fname in prev_pkl_file_list:
-                            target_path = osp.join(pred_root, osp.basename(fname))
-                            if not osp.exists(target_path):
-                                shutil.copy(fname, target_path)
-                                logger.info(f'--reuse is set, will reuse the prediction pickle file {fname}.')
-                            else:
-                                logger.warning(f'File already exists: {target_path}')
+                    prepare_reuse_files(
+                        pred_root_meta=pred_root_meta, eval_id=eval_id, model_name=model_name,
+                        dataset_name=dataset_name, reuse=args.reuse, reuse_aux=args.reuse_aux
+                    )
 
                 if WORLD_SIZE > 1:
                     dist.barrier()
@@ -423,37 +314,38 @@ def main():
                 if model is None:
                     model = model_name  # which is only a name
 
-                # Perform the Inference
-                if dataset.MODALITY == 'VIDEO':
-                    model = infer_data_job_video(
-                        model,
-                        work_dir=pred_root,
-                        model_name=model_name,
-                        dataset=dataset,
-                        result_file_name=result_file_base,
-                        verbose=args.verbose,
-                        api_nproc=args.api_nproc,
-                        use_vllm=args.use_vllm)
-                elif dataset.TYPE == 'MT':
-                    model = infer_data_job_mt(
-                        model,
-                        work_dir=pred_root,
-                        model_name=model_name,
-                        dataset=dataset,
-                        verbose=args.verbose,
-                        api_nproc=args.api_nproc,
-                        ignore_failed=args.ignore,
-                        use_vllm=args.use_vllm)
-                else:
-                    model = infer_data_job(
-                        model,
-                        work_dir=pred_root,
-                        model_name=model_name,
-                        dataset=dataset,
-                        verbose=args.verbose,
-                        api_nproc=args.api_nproc,
-                        ignore_failed=args.ignore,
-                        use_vllm=args.use_vllm)
+                if args.mode != "eval":
+                    # Perform the Inference
+                    if dataset.MODALITY == 'VIDEO':
+                        model = infer_data_job_video(
+                            model,
+                            work_dir=pred_root,
+                            model_name=model_name,
+                            dataset=dataset,
+                            result_file_name=result_file_base,
+                            verbose=args.verbose,
+                            api_nproc=args.api_nproc,
+                            use_vllm=args.use_vllm)
+                    elif dataset.TYPE == 'MT':
+                        model = infer_data_job_mt(
+                            model,
+                            work_dir=pred_root,
+                            model_name=model_name,
+                            dataset=dataset,
+                            verbose=args.verbose,
+                            api_nproc=args.api_nproc,
+                            ignore_failed=args.ignore,
+                            use_vllm=args.use_vllm)
+                    else:
+                        model = infer_data_job(
+                            model,
+                            work_dir=pred_root,
+                            model_name=model_name,
+                            dataset=dataset,
+                            verbose=args.verbose,
+                            api_nproc=args.api_nproc,
+                            ignore_failed=args.ignore,
+                            use_vllm=args.use_vllm)
 
                 # Set the judge kwargs first before evaluation or dumping
 
@@ -471,26 +363,54 @@ def main():
                 else:
                     print(dataset_name)
                     if dataset.TYPE in ['MCQ', 'Y/N', 'MCQ_MMMU_Pro'] or listinstr(
-                        ['moviechat1k'], dataset_name.lower()
+                        ['moviechat1k', 'mme-reasoning'], dataset_name.lower()
                     ):
-                        if listinstr(['WeMath'], dataset_name):
+                        if listinstr(['WeMath', 'MME-Reasoning'], dataset_name):
                             judge_kwargs['model'] = 'gpt-4o-mini'
                         elif listinstr(['VisuLogic'], dataset_name):
                             judge_kwargs['model'] = 'exact_matching'
                         else:
                             judge_kwargs['model'] = 'chatgpt-0125'
                     elif listinstr(['MMVet', 'LLaVABench', 'MMBench_Video'], dataset_name):
-                        judge_kwargs['model'] = 'gpt-4-turbo'
+                        if listinstr(['LLaVABench_KO'], dataset_name):
+                            judge_kwargs['model'] = 'gpt-4o-0806'
+                        else:
+                            judge_kwargs['model'] = 'gpt-4-turbo'
                     elif listinstr(['VGRPBench'], dataset_name):
                         judge_kwargs['model'] = 'gpt-4o'
-                    elif listinstr(['MathVista', 'MathVerse', 'MathVision', 'DynaMath', 'VL-RewardBench', 'LogicVista', 'MOAT', 'OCR_Reasoning'], dataset_name):  # noqa: E501
+                    elif listinstr(['MathVista', 'MathVerse', 'MathVision', 'LENS', 'DynaMath', 'VL-RewardBench', 'LogicVista', 'MOAT', 'OCR_Reasoning', 'VTCBench', 'Asclepius'], dataset_name):  # noqa: E501
                         judge_kwargs['model'] = 'gpt-4o-mini'
+                    elif listinstr(['OlympiadBench'], dataset_name):
+                        use_api_judger = judge_kwargs.get("olympiad_use_api_judger", False)
+                        if use_api_judger:
+                            judge_kwargs['model'] = 'gpt-4o-mini'
                     elif listinstr(['MMLongBench', 'MMDU', 'DUDE', 'SLIDEVQA', 'MIA-Bench', 'WildVision', 'MMAlignBench', 'MM-IFEval'], dataset_name):  # noqa: E501
+                        judge_kwargs['model'] = 'gpt-4o'
+                    elif listinstr(['ChartMimic'], dataset_name):
                         judge_kwargs['model'] = 'gpt-4o'
                     elif listinstr(['VDC'], dataset_name):
                         judge_kwargs['model'] = 'llama31-8b'
-                    elif listinstr(['VideoMMLU_QA', 'VideoMMLU_CAP'], dataset_name):
+                    elif listinstr(['Video_MMLU_QA', 'Video_MMLU_CAP'], dataset_name):
                         judge_kwargs['model'] = 'qwen-72b'
+                    elif listinstr(['MMVMBench'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4o'
+                    elif listinstr(['CVQA_EN', 'CVQA_LOC'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4.1'
+                    elif listinstr(['M4Bench'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4o'
+                    elif listinstr(['AyaVisionBench'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4.1'
+                    elif listinstr(['MathCanvas'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4.1-2025-04-14'
+                    elif listinstr(['MMReason'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4.1',
+                    elif listinstr(['CoreCognition'], dataset_name):
+                        judge_kwargs['model'] = 'gpt-4.1'
+
+                if args.use_verifier:
+                    judge_kwargs['use_verifier'] = True
+                if args.use_vllm:
+                    judge_kwargs['use_vllm'] = True
 
                 if RANK == 0:
                     logger.info(judge_kwargs)

@@ -209,18 +209,19 @@ class Gemma3(BaseModel):
             add_generation_prompt=True
         )
         sampling_params = SamplingParams(temperature=0.0,
-                                         max_tokens=self.kwargs['max_new_tokens'])
+                                         max_tokens=self.kwargs.get('max_new_tokens', 4096))
+        
+        # FIX
+        generate_kwargs = {"prompt": prompt}
+        if len(images) > 0:
+            generate_kwargs["multi_modal_data"] = {"image": images}
+
         outputs = self.llm.generate(
-            {
-                "prompt": prompt,
-                "multi_modal_data": {
-                    "image": images
-                },
-            },
+            generate_kwargs, 
             sampling_params=sampling_params
         )
-        for o in outputs:
-            generated_text = o.outputs[0].text
+        
+        generated_text = outputs[0].outputs[0].text
         return generated_text
 
     def generate_inner(self, message, dataset=None):

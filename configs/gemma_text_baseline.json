@@ -1,0 +1,15 @@
+{
+    "model": {
+        "Gemma3-4B": {
+            "class": "Gemma3",
+            "model_path": "google/gemma-3-4b-it",
+            "use_vllm": true
+        }
+    },
+    "data": {
+        "ENGLISH_TEST__Sheet1_TextOnly": {
+            "class": "AfrimedTextQA",
+            "dataset": "ENGLISH_TEST__Sheet1_TextOnly"
+        }
+    }
+}

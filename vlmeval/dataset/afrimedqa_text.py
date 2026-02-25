@@ -1,25 +1,24 @@
+import os
 import os.path as osp
-from vlmeval.dataset.image_mcq import ImageMCQDataset
-from .utils import build_judge, DEBUG_MESSAGE
-from ..smp import *
 import pandas as pd
 import re
-import os
 import string
 import warnings
-import re
 
-# evaluate MCQs
-class AfrimedQA(ImageMCQDataset):
+from vlmeval.dataset.text_mcq import TextMCQDataset
+from .utils import build_judge, DEBUG_MESSAGE
+from ..smp import *
 
-    DATASET_URL = {"AfriMedQA": ""}
-    DATASET_MD5 = {"AfriMedQA": ""}
+class AfrimedTextQA(TextMCQDataset):
+    
+    DATASET_URL = {"AfrimedTextQA": ""}
+    DATASET_MD5 = {"AfrimedTextQA": ""}
 
     @classmethod
     def supported_datasets(cls):
-        return ['AfrimedQA']
+        return ['AfrimedTextQA']
 
-    def load_data(self, dataset="AfrimedQA", **kwargs):
+    def load_data(self, dataset="AfrimedTextQA", **kwargs):
         if (hasattr(self.__class__, "DATASET_URL")
             and dataset in self.__class__.DATASET_URL
             and osp.exists(self.__class__.DATASET_URL[dataset])):
@@ -29,48 +28,31 @@ class AfrimedQA(ImageMCQDataset):
 
         if not osp.exists(data_path):
             raise FileNotFoundError(f"Dataset file not found: {data_path}")
-        
-        df = load(data_path)
 
-        # Filter for MCQ ONLY
-        if 'question_type' in df.columns:
-            df = df[df['question_type'] == 'MCQ'].copy()
-
-        return df
+        return load(data_path)
     
 
-    def build_prompt(self, line):
-        # Get the default (defined in base classses) framework prompt 
-        msgs = super().build_prompt(line)
-        
-        # Define the MCQ-specific clinical CoT constraints
-        cot_clinical_constraints = (
-            "\n\nAct as an expert clinical AI. "
-            "First, step-by-step reason through the clinical presentation and evaluate each option. "
-            "Then, provide your final answer separated by the exact phrase 'FINAL ANSWER: '. "
-            "Your final answer must be exactly one letter corresponding to the correct option (e.g., A, B, C, or D). "
-            "Do NOT include medical disclaimers."
-        )
-        
-        # append it to the text portion of the payload
-        for msg in msgs:
-            if msg['type'] == 'text':
-                msg['value'] += cot_clinical_constraints
-                break 
-                
-        return msgs
 
     def evaluate(self, eval_file, **judge_kwargs):
         logger = get_logger('Evaluation')
-        logger.info("Starting evaluation for Afrimed MCQA...")
+        logger.info("Starting evaluation for Afrimed Text-Only MCQA...")
+        
         from .utils.multiple_choice import (
             report_acc, report_acc_MMT, report_acc_MMSci, mcq_circular_eval, mcq_vanilla_eval
         )
 
+        dataset_map = {
+            'MMBench_TEST_EN': 'MMBench', 'MMBench_TEST_EN_V11': 'MMBench_V11',
+            'MMBench_TEST_CN': 'MMBench_CN', 'MMBench_TEST_CN_V11': 'MMBench_CN_V11'
+        }
         dataset = self.dataset_name
+        if dataset in dataset_map:
+            dataset = dataset_map[dataset]
+
         nproc = judge_kwargs.pop('nproc', 4)
         circular = False
 
+        # Circular protocols for certain datasets
         if listinstr(['mmbench', 'ccbench', 'circular', 'mmcr'], dataset.lower()):
             data = load(eval_file)
             data['index'] = [int(x) for x in data['index']]
@@ -79,8 +61,10 @@ class AfrimedQA(ImageMCQDataset):
 
         suffix = eval_file.split('.')[-1]
         model = judge_kwargs.get('model', 'exact_matching')
+        assert model in ['chatgpt-0125', 'exact_matching', 'gpt-4-0125']
         name_str_map = {'chatgpt-0125': 'openai', 'gpt-4-0125': 'gpt4'}
         name_str = name_str_map[model] if model in name_str_map else model
+
 
         if model == 'exact_matching':
             model = None
@@ -96,59 +80,56 @@ class AfrimedQA(ImageMCQDataset):
 
         result_file = eval_file.replace(f'.{suffix}', f'_{name_str}_result.pkl')
 
-        # Load data
+
         data = load(eval_file)
         data = data.sort_values(by='index')
+
+
+        if 'question_type' in data.columns:
+            mcq_data = data[data['question_type'] == 'MCQ']
+            saq_data = data[data['question_type'] == 'SAQ']
+        else:
+            mcq_data = data
+            saq_data = pd.DataFrame()
+            
+
         data['prediction'] = [str(x) for x in data['prediction']]
 
-        # Align Ground Truth Metadata
-        meta = self.data
-        if 'question_type' in meta.columns:
-            meta = meta[meta['question_type'] == 'MCQ'].copy()
 
-        # Handle Answer Mirroring
         if 'correct_option' in data.columns:
             data['answer'] = data['correct_option']
-        elif 'answer' not in data.columns and 'correct_option' in meta.columns:
-            data = data.merge(meta[['index', 'correct_option']], on='index', how='left')
-            data['answer'] = data['correct_option']
+
+        def extract_choice(text):
+            match = re.search(r'\b([A-E])\b', str(text).upper())
+            if match:
+                return match.group(1)
+            return "INVALID"
+
+        data['prediction'] = data['prediction'].apply(extract_choice)
 
         if 'index' not in data.columns:
             data.reset_index(inplace=True)
 
-        def extract_choice(text):
-            text = str(text)
-            
-            # Catch CoT format first (e.g., "FINAL ANSWER: A" or "FINAL ANSWER: **A**")
-            match = re.search(r'FINAL ANSWER:\s*\*?\*?([A-E])', text, re.IGNORECASE)
-            if match: return match.group(1).upper()
+        cols = ['index', 'question', 'prediction', 'answer']
+        cols = [c for c in cols if c in data.columns]
 
-            #  Matches strict format "**A." or "**A**"
-            match = re.search(r'\*\*(A|B|C|D|E)(?:\.|\*\*)', text)
-            if match: return match.group(1)
-            
-            # Matches "answer is A"
-            match = re.search(r'answer is (A|B|C|D|E)', text, re.IGNORECASE)
-            if match: return match.group(1).upper()
-            
-            # Fallback: Matches "Option A"
-            match = re.search(r'Option (A|B|C|D|E)', text, re.IGNORECASE)
-            if match: return match.group(1).upper()
-            
-            # Fallback: Standalone letter with a period (A.)
-            match = re.search(r'\b(A|B|C|D|E)\.', text)
-            if match: return match.group(1)
-            
-            return "INVALID"
+        print("\nSample Predictions vs. Ground Truth:\n")
+        try:
+            print(data[cols].head(10).to_markdown(index=False))
+        except Exception:
+            print(data[cols].head(10).to_string(index=False))
 
-        # Apply our custom regex to clean the predictions
-        data['prediction'] = data['prediction'].apply(extract_choice)
 
-        # Lowercase keys for consistency
+        data = data[data['prediction'].isin(['A', 'B', 'C', 'D', 'E'])]
+
+
         for k in list(data.keys()):
             new_k = k if k in list(string.ascii_uppercase) else k.lower()
             if new_k != k:
                 data[new_k] = data.pop(k)
+
+        meta = self.data
+
 
         if 'correct_option' in meta.columns:
             num_missing_correct = meta['correct_option'].isna().sum()
@@ -156,8 +137,9 @@ class AfrimedQA(ImageMCQDataset):
         else:
             print("Column 'correct_option' not found in the dataset.")
 
-        mcq_num = len(meta)
+        mcq_num = (meta['question_type'] == 'MCQ').sum() if 'question_type' in meta.columns else len(meta)
         print(f"Total number of MCQ questions: {mcq_num}")
+
 
         meta_q_map = {x: y for x, y in zip(meta['index'], meta['question'])} if 'index' in meta and 'question' in meta else {}
         data_map = {x: y for x, y in zip(data['index'], data['question'])} if 'index' in data and 'question' in data else {}
@@ -166,7 +148,7 @@ class AfrimedQA(ImageMCQDataset):
                 f'eval_file should be the same as or a subset of dataset {self.dataset_name}'
             )
 
-        #  Extraction and LLM Judging
+
         if circular:
             data = mcq_circular_eval(model, data, meta, nproc, result_file, self.dataset_name)
         else:
@@ -199,15 +181,60 @@ class AfrimedQA(ImageMCQDataset):
         dump(acc, score_file)
         print("Score file to be written:", score_file)
 
-        acc_map = {'main': acc}
-        score_all = acc
+        acc_map = {}
 
+
+        if circular and os.environ.get('PRINT_VANILLA', None) == '1':
+            acc_map['circular'] = acc
+
+            data0_all = load(eval_file)
+            data0_all['index'] = [int(x) for x in data0_all['index']]
+            if 'g_index' in data0_all:
+                data0_all['g_index'] = [int(x) for x in data0_all['g_index']]
+                circ0 = data0_all[data0_all['g_index'] == data0_all['index']]
+            else:
+                offset = 1e6
+                circ0 = data0_all[data0_all['index'] <= offset]
+
+            result_file = eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_result.pkl')
+            data0 = mcq_vanilla_eval(model, circ0, meta, nproc, result_file, self.dataset_name)
+            dump(data0, eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_circ0_result.{suffix}'))
+            datac0 = load(eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_circ0_result.{suffix}'))
+            acc_map['vanilla_0'] = report_acc(datac0)
+
+
+            data_all = load(eval_file)
+            dataall = mcq_vanilla_eval(model, data_all, meta, nproc, result_file, self.dataset_name)
+            dump(dataall, eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_all_result.{suffix}'))
+            data_va = load(eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_all_result.{suffix}'))
+            acc_map['vanilla_all'] = report_acc(data_va)
+
+
+            for k, v in acc_map.items():
+                if 'split' not in v:
+                    v['split'] = [None] * len(v)
+                if len(v) == 1 and pd.isna(v['split'][0]):
+                    v['split'] = [k]
+                else:
+                    assert not pd.isna(v['split'][0])
+                    v['split'] = [k + '_' + sp for sp in v['split']]
+
+            score_all = pd.concat([acc_map['vanilla_0'], acc_map['vanilla_all'], acc_map['circular']])
+
+        else:
+            if 'split' not in acc.columns:
+                acc['split'] = ['test'] * len(acc)
+            acc_map['main'] = acc
+            score_all = acc
+
+        # Append totals to each accuracy table
         total_questions = len(data)
         total_correct = data['hit'].sum() if 'hit' in data.columns else 0
         for acc_df in acc_map.values():
             acc_df['Total_Correct'] = int(total_correct)
             acc_df['Total_Questions'] = int(total_questions)
 
+        # Save detailed per-question results
         full_data_file = eval_file.replace(f'.{suffix}', '_full_data.csv')
         data.to_csv(full_data_file, index=False, encoding='utf-8')
         print(f"Full data written to: {full_data_file}")
@@ -219,5 +246,14 @@ class AfrimedQA(ImageMCQDataset):
         print("Score file to be written:", score_file)
 
         dump(score_all, score_file)
+
+        if dataset == 'AesBench_VAL':
+            warnings.warn(
+                'AesBench VAL is a toy subset of AesBench TEST. For full results, use AesBench TEST.'
+            )
+        if dataset == 'VisOnlyQA-VLMEvalKit':
+            warnings.warn(
+                'Results differ from the original VisOnlyQA due to split changes and different prompts.'
+            )
 
         return acc
