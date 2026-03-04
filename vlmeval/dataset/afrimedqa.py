@@ -9,7 +9,7 @@ import string
 import warnings
 import re
 
-# evaluate MCQs
+# load and evaluate MCQs
 class AfrimedQA(ImageMCQDataset):
 
     DATASET_URL = {"AfriMedQA": ""}
@@ -40,7 +40,7 @@ class AfrimedQA(ImageMCQDataset):
     
 
     def build_prompt(self, line):
-        # Get the default (defined in base classses) framework prompt 
+        # Get the default framework prompt 
         msgs = super().build_prompt(line)
         
         # Define the MCQ-specific clinical CoT constraints
@@ -52,7 +52,7 @@ class AfrimedQA(ImageMCQDataset):
             "Do NOT include medical disclaimers."
         )
         
-        # append it to the text portion of the payload
+        # append it to the  payload
         for msg in msgs:
             if msg['type'] == 'text':
                 msg['value'] += cot_clinical_constraints
@@ -117,29 +117,34 @@ class AfrimedQA(ImageMCQDataset):
             data.reset_index(inplace=True)
 
         def extract_choice(text):
-            text = str(text)
             
-            # Catch CoT format first (e.g., "FINAL ANSWER: A" or "FINAL ANSWER: **A**")
+            text = str(text).strip()
+            
+            
             match = re.search(r'FINAL ANSWER:\s*\*?\*?([A-E])', text, re.IGNORECASE)
             if match: return match.group(1).upper()
 
-            #  Matches strict format "**A." or "**A**"
+           
             match = re.search(r'\*\*(A|B|C|D|E)(?:\.|\*\*)', text)
             if match: return match.group(1)
             
-            # Matches "answer is A"
+   
             match = re.search(r'answer is (A|B|C|D|E)', text, re.IGNORECASE)
             if match: return match.group(1).upper()
             
-            # Fallback: Matches "Option A"
-            match = re.search(r'Option (A|B|C|D|E)', text, re.IGNORECASE)
-            if match: return match.group(1).upper()
             
-            # Fallback: Standalone letter with a period (A.)
             match = re.search(r'\b(A|B|C|D|E)\.', text)
             if match: return match.group(1)
             
+            
+            if text.upper() in ['A', 'B', 'C', 'D', 'E']:
+                return text.upper()
+                
+            match = re.match(r'^([A-E])\b', text, re.IGNORECASE)
+            if match: return match.group(1).upper()
+            
             return "INVALID"
+
 
         # Apply our custom regex to clean the predictions
         data['prediction'] = data['prediction'].apply(extract_choice)
