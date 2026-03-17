@@ -155,3 +155,96 @@ print(ret)  # The image features a red apple with a leaf on it.
 ret = model.generate(['assets/apple.jpg', 'assets/apple.jpg', 'How many apples are there in the provided images?'])
 print(ret)  # There are two apples in the provided images.
 ```
+
+------------------------------------------------------------------------
+
+## Machine Translation Evaluation (`mt_eval/`)
+
+The `mt_eval` pipeline evaluates translation quality for AfriMedQA SAQ question-answer pairs from English into African languages (e.g. Twi). It scores translations using **ChrF** and **SSA-COMET**.
+
+### Running an MT Evaluation (example)
+
+```bash
+python -m mt_eval.run mt_eval/configs/en_twi_vllm.json
+```
+
+Replace the config path with whichever backend you want to use.
+
+### Config Structure
+
+All configs live in `mt_eval/configs/` and share the same `data` block:
+
+```json
+{
+    "data": {
+        "source_file": "test_files/ENGLISH_TEST__Sheet1.tsv",
+        "target_file": "test_files/TWI_TEST__Sheet1.tsv",
+        "source_lang": "English",
+        "target_lang": "Twi"
+    },
+    "model": { ... },
+    "output_dir": "outputs/mt_eval"
+}
+```
+
+The `source_file` and `target_file` should be TSV files with parallel question-answer pairs.
+
+### Example Model Backends
+
+| Config file | Backend | Example model |
+|---|---|---|
+| `en_twi_vllm.json` | vLLM | `Qwen/Qwen2.5-7B-Instruct` |
+| `en_twi_gemini.json` | Gemini API | `gemini-2.0-flash` |
+| `en_twi_gemma.json` | HuggingFace (chat) | `google/gemma-3-4b-it` |
+| `en_twi_nllb.json` | Seq2Seq (NLLB) | `facebook/nllb-200-3.3B` |
+
+**vLLM config example:**
+```json
+{
+    "model": {
+        "type": "vllm",
+        "model_name": "Qwen/Qwen2.5-7B-Instruct",
+        "max_tokens": 512,
+        "temperature": 0.0,
+        "vllm_kwargs": { "gpu_memory_utilization": 0.9, "dtype": "bfloat16" }
+    }
+}
+```
+
+**Gemini config example** (requires `GEMINI_API_KEY` env variable or set `"api_key"` in config):
+```json
+{
+    "model": {
+        "type": "gemini",
+        "model_name": "gemini-2.0-flash",
+        "api_key": "GEMINI_API_KEY",
+        "max_tokens": 512,
+        "temperature": 0.0
+    }
+}
+```
+
+**NLLB (seq2seq) config example:**
+```json
+{
+    "model": {
+        "type": "seq2seq",
+        "model_name": "facebook/nllb-200-3.3B",
+        "src_lang": "eng_Latn",
+        "tgt_lang": "twi_Latn",
+        "max_tokens": 512
+    }
+}
+```
+
+### Outputs
+
+Results are written to `outputs/mt_eval/` (or the path set in `output_dir`):
+
+- `{src}_{tgt}_{model}_results.csv` — per-sample translations with sentence-level ChrF and SSA-COMET scores
+- `{src}_{tgt}_{model}_summary.csv` — corpus-level summary with mean ChrF (question, answer, combined) and SSA-COMET system scores
+
+### Metrics
+
+- **ChrF**: character n-gram F-score, reported at both sentence and corpus level
+- **SSA-COMET**: reference-based neural MT metric fine-tuned for Sub-Saharan African languages
