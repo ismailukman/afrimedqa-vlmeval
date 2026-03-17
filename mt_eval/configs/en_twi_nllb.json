@@ -1,0 +1,16 @@
+{
+    "data": {
+        "source_file": "test_files/ENGLISH_TEST__Sheet1.tsv",
+        "target_file": "test_files/TWI_TEST__Sheet1.tsv",
+        "source_lang": "English",
+        "target_lang": "Twi"
+    },
+    "model": {
+        "type": "seq2seq",
+        "model_name": "facebook/nllb-200-3.3B",
+        "src_lang": "eng_Latn",
+        "tgt_lang": "twi_Latn",
+        "max_tokens": 512
+    },
+    "output_dir": "outputs/mt_eval"
+}

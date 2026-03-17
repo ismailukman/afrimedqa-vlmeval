@@ -1,16 +1,15 @@
 {
     "model": {
-        "medgemma-4b-it": {
-            "class": "Gemma3", 
-            "model_path": "google/medgemma-4b-it",
-            "use_vllm": true
+        "InternVL2_5-8B": {
+            "class": "InternVLChat",
+            "model_path": "OpenGVLab/InternVL2_5-8B",
+            "version": "V2.0" 
         }
     },
-
     "data": {
-        "ENGLISH_TEST__Sheet1": {
-            "class": "AfrimedShortQA",
-            "dataset": "ENGLISH_TEST__Sheet1"
+        "IGBO_TEST__Sheet1": {
+            "class": "AfrimedQA",
+            "dataset": "IGBO_TEST__Sheet1"
         }
     }
 }

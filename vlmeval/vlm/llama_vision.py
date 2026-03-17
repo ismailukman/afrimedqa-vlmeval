@@ -27,10 +27,7 @@ class llama_vision(BaseModel):
 
         self.device = 'cuda'
         self.processor = AutoProcessor.from_pretrained(model_path)
-        if 'Instruct' in model_path or 'cot' in model_path or 'CoT' in model_path:
-            kwargs_default = dict(do_sample=True, temperature=0.6, top_p=0.9)
-        else:
-            kwargs_default = dict(do_sample=False, max_new_tokens=2048, temperature=0.0, top_p=None, num_beams=1)
+        kwargs_default = dict(max_new_tokens=2048)
         kwargs.update(kwargs_default)
         print(f'Following kwargs received: {kwargs}, will use as generation config. ')
         self.kwargs = kwargs
@@ -134,15 +131,25 @@ class llama_vision(BaseModel):
     def generate_inner(self, message, dataset=None):
         prompt, image_path = self.message_to_promptimg(message, dataset=dataset)
 
-        image = Image.open(image_path)
-        messages = [
-            {'role': 'user', 'content': [
-                {'type': 'image'},
-                {'type': 'text', 'text': prompt}
-            ]}
-        ]
-        input_text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = self.processor(image, input_text, return_tensors='pt').to(self.device)
+        if image_path is not None:
+            image = Image.open(image_path)
+            messages = [
+                {'role': 'user', 'content': [
+                    {'type': 'image'},
+                    {'type': 'text', 'text': prompt}
+                ]}
+            ]
+            input_text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+            inputs = self.processor(image, input_text, return_tensors='pt').to(self.device)
+        else:
+            # when sampling without valid vision tokens.
+            messages = [
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt}
+                ]}
+            ]
+            input_text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+            inputs = self.processor(text=input_text, return_tensors='pt').to(self.device)
         if not self.use_custom_prompt(dataset):
             if dataset is not None and DATASET_TYPE(dataset) in ['MCQ', 'Y/N']:
                 self.kwargs['max_new_tokens'] = 128

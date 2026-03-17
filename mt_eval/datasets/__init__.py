@@ -1,0 +1,1 @@
+from .parallel_corpus import load_parallel_corpus

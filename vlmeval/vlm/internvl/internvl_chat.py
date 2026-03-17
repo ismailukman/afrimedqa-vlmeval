@@ -344,7 +344,7 @@ class InternVLChat(BaseModel):
 
     def generate_v1_5(self, message, dataset=None):
         image_num = len([x for x in message if x['type'] == 'image'])
-        max_num = max(1, min(self.max_num, self.total_max_num // image_num))
+        max_num = max(1, min(self.max_num, self.total_max_num // image_num)) if image_num > 0 else self.max_num
         prompt = '\n'.join([x['value'] for x in message if x['type'] == 'text'])
 
         if DATASET_MODALITY(dataset) == 'VIDEO':
@@ -376,7 +376,7 @@ class InternVLChat(BaseModel):
         use_mpo_prompt = self.use_mpo_prompt and (self.use_cot or dataset in ['MMStar', 'HallusionBench', 'OCRBench'])
 
         image_num = len([x for x in message if x['type'] == 'image'])
-        max_num = max(1, min(self.max_num, self.total_max_num // image_num))
+        max_num = max(1, min(self.max_num, self.total_max_num // image_num)) if image_num > 0 else self.max_num
         prompt = reorganize_prompt(message, image_num, dataset=dataset)
 
         if dataset is not None and DATASET_MODALITY(dataset) == 'VIDEO':

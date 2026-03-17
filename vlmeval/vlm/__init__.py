@@ -12,6 +12,7 @@ from .instructblip import InstructBLIP
 from .kosmos import Kosmos2
 from .llava import (
     LLaVA,
+    LLaVA_Med,
     LLaVA_Next,
     LLaVA_XTuner,
     LLaVA_Next2,

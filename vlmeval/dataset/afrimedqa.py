@@ -43,13 +43,9 @@ class AfrimedQA(ImageMCQDataset):
         # Get the default framework prompt 
         msgs = super().build_prompt(line)
         
-        # Define the MCQ-specific clinical CoT constraints
+        # Define the MCQ-specific prompt constraint
         cot_clinical_constraints = (
-            "\n\nAct as an expert clinical AI. "
-            "First, step-by-step reason through the clinical presentation and evaluate each option. "
-            "Then, provide your final answer separated by the exact phrase 'FINAL ANSWER: '. "
-            "Your final answer must be exactly one letter corresponding to the correct option (e.g., A, B, C, or D). "
-            "Do NOT include medical disclaimers."
+            "\n\nAnswer with only a single letter corresponding to the correct option: A, B, C, or D."
         )
         
         # append it to the  payload
@@ -129,10 +125,13 @@ class AfrimedQA(ImageMCQDataset):
             if match: return match.group(1)
             
    
-            match = re.search(r'answer is (A|B|C|D|E)', text, re.IGNORECASE)
+            match = re.search(r'answer is:?\s*(A|B|C|D|E)', text, re.IGNORECASE)
             if match: return match.group(1).upper()
-            
-            
+
+            match = re.search(r'[Aa]nswer:\s*([A-E])', text)
+            if match: return match.group(1).upper()
+
+
             match = re.search(r'\b(A|B|C|D|E)\.', text)
             if match: return match.group(1)
             
@@ -142,7 +141,11 @@ class AfrimedQA(ImageMCQDataset):
                 
             match = re.match(r'^([A-E])\b', text, re.IGNORECASE)
             if match: return match.group(1).upper()
-            
+
+            # Last resort: find the last standalone A-D in the text
+            match = re.search(r'\b([A-D])\b(?=[^A-D]*$)', text)
+            if match: return match.group(1).upper()
+
             return "INVALID"
 
 

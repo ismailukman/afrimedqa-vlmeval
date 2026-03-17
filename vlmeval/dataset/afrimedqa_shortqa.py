@@ -9,10 +9,6 @@ from vlmeval.api.gemini import Gemini
 from vlmeval.api.claude import Claude3V
 from openai import OpenAI
 
-import sacrebleu
-
-
-from comet import download_model, load_from_checkpoint
 from deepeval.metrics import GEval
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 from deepeval import evaluate as deepeval_evaluate
@@ -121,28 +117,6 @@ class AfrimedShortQA(ImageShortQADataset):
         data['LLM_Judge_Reason'] = "Not Evaluated"
 
         results = {}
-
-        # BLEU/ChrF++
-        if sacrebleu:
-            logger.info("Calculating BLEU and ChrF++...")
-            bleu = sacrebleu.corpus_bleu(predictions, [references], tokenize='13a')
-            results['BLEU'] = bleu.score
-            chrf = sacrebleu.corpus_chrf(predictions, [references], word_order=2)
-            results['ChrF++'] = chrf.score
-
-        # SSA-COMET
-        if download_model:
-            logger.info("Loading SSA-COMET model...")
-            try:
-                model_path = download_model("McGill-NLP/ssa-comet-mtl")
-                model = load_from_checkpoint(model_path)
-                comet_data = [{"src": s, "mt": p, "ref": r} for s, p, r in zip(sources, predictions, references)]
-                
-                prediction = model.predict(comet_data, batch_size=8, gpus=1)
-                results['SSA-COMET'] = prediction.system_score * 100 
-                data['SSA_COMET_Score'] = prediction.scores
-            except Exception as e:
-                logger.error(f"Failed to run SSA-COMET: {e}")
 
         #  DeepEval G-Eval (adappted with Med-PaLM 2 Clinical Axes rubric criteria for evaluation)
         logger.info("Running Med-PaLM 2 Clinical Axes Evaluation via DeepEval...")

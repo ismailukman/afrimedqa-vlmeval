@@ -42,20 +42,75 @@ class molmo(BaseModel):
             logging.critical('Please install transformer and einops before using molmo.')
             raise e
 
-        if '72b' not in model_path.lower():
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16,
-                device_map='cuda')
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16,
-                device_map="auto")
+        # transformers 5.x removed 'default' from ROPE_INIT_FUNCTIONS; add it back
+        # so remote model code (e.g. Molmo2) that relies on it still works.
+        try:
+            from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+            if 'default' not in ROPE_INIT_FUNCTIONS:
+                def _default_rope(config, device=None, **kwargs):
+                    import math
+                    base = getattr(config, 'rope_theta', 10000.0)
+                    head_dim = getattr(config, 'head_dim',
+                                       config.hidden_size // config.num_attention_heads)
+                    partial = getattr(config, 'partial_rotary_factor', 1.0)
+                    dim = int(head_dim * partial)
+                    inv_freq = 1.0 / (base ** (
+                        torch.arange(0, dim, 2, dtype=torch.int64).float().to(device) / dim
+                    ))
+                    return inv_freq, 1.0
+                ROPE_INIT_FUNCTIONS['default'] = _default_rope
+        except ImportError:
+            pass
 
-        self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16)
+        device_map = "auto" if '72b' in model_path.lower() else 'cuda'
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+                device_map=device_map)
+        except ValueError:
+            # Molmo2 and other custom-arch models have an auto_map but aren't registered
+            # in AutoModelForCausalLM's registry. Load via the dynamic module directly.
+            from transformers import AutoConfig
+            from transformers.dynamic_module_utils import get_class_from_dynamic_module
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            auto_map = getattr(config, 'auto_map', {})
+            # Try common Auto model keys in priority order
+            model_key = next(
+                (k for k in ('AutoModelForCausalLM', 'AutoModelForImageTextToText',
+                              'AutoModel', 'AutoModelForVision2Seq')
+                 if k in auto_map),
+                None
+            )
+            assert model_key is not None, \
+                f'No usable model class in auto_map {list(auto_map.keys())} for {model_path}'
+            model_cls = get_class_from_dynamic_module(auto_map[model_key], model_path)
+            self.model = model_cls.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+                device_map=device_map)
+
+        # transformers 5.x ProcessorMixin.__init__ rejects unexpected kwargs that
+        # older remote processor code (e.g. Molmo2) passes to super().__init__().
+        # Patch it to accept all kwargs: pass valid ones to the original init,
+        # then manually set the extras as attributes so subclass code can use them.
+        import inspect
+        from transformers.processing_utils import ProcessorMixin
+        _orig_proc_init = ProcessorMixin.__init__
+        _valid_proc_params = set(inspect.signature(_orig_proc_init).parameters) - {'self'}
+        def _tolerant_proc_init(self_, *a, **kw):
+            valid_kw = {k: v for k, v in kw.items() if k in _valid_proc_params}
+            extra_kw = {k: v for k, v in kw.items() if k not in _valid_proc_params}
+            _orig_proc_init(self_, *a, **valid_kw)
+            for k, v in extra_kw.items():
+                setattr(self_, k, v)
+        ProcessorMixin.__init__ = _tolerant_proc_init
+        try:
+            self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        finally:
+            ProcessorMixin.__init__ = _orig_proc_init
         self.kwargs = kwargs
         self.model_name = model_path
         # set default maximum number of crops to 36
@@ -144,10 +199,13 @@ class molmo(BaseModel):
         }
         for key, item in options.items():
             question += f'\n{key}: {item}'
-        if prefix is None:
-            prompt = f"{TYPE_PROMPTS['MCQ']} {question}"
-        else:
+        if prefix is not None:
             prompt = f"{prefix} {question}"
+        elif hasattr(self, 'model') and not hasattr(self.model, 'generate_from_batch'):
+            # Molmo2: use a plain instruction instead of Molmo1-specific task prefix
+            prompt = f"{question}\nAnswer with only the letter of the correct option (A, B, C, D, or E)."
+        else:
+            prompt = f"{TYPE_PROMPTS['MCQ']} {question}"
 
         return prompt
 
@@ -163,34 +221,61 @@ class molmo(BaseModel):
         from transformers import GenerationConfig
         prompt, image_path = self.message_to_promptimg(message, dataset=dataset)
 
-        image = Image.open(image_path)
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+        if image_path is not None:
+            image = Image.open(image_path)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            images = [image]
+        else:
+            images = None
+
+        tokenizer = self.processor.tokenizer
 
         # process the image and text
+        # Molmo1 uses .process(); Molmo2 uses apply_chat_template via standard __call__
         max_crops = self.max_crops
-        inputs = self.processor.process(
-            images=[image],
-            text=prompt,
-            images_kwargs={
-                "max_crops": max_crops
-            }
-        )
-
-        # move inputs to the correct device and make a batch of size 1
-        inputs = {k: v.to(self.model.device).unsqueeze(0) for k, v in inputs.items()}
-
-        # generate output; maximum 200 new tokens; stop generation when <|endoftext|> is generated
-        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
-            output = self.model.generate_from_batch(
-                inputs,
-                GenerationConfig(max_new_tokens=200, stop_strings="<|endoftext|>"),
-                tokenizer=self.processor.tokenizer
+        if hasattr(self.processor, 'process'):
+            proc_kwargs = dict(text=prompt, images=images,
+                               images_kwargs={"max_crops": max_crops})
+            inputs = self.processor.process(**proc_kwargs)
+            inputs = {k: v.to(self.model.device).unsqueeze(0) for k, v in inputs.items()}
+        else:
+            # Molmo2: build messages list and use apply_chat_template for proper formatting
+            content = []
+            if images is not None:
+                content.append({"type": "image", "image": images[0]})
+            content.append({"type": "text", "text": prompt})
+            messages = [{"role": "user", "content": content}]
+            inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
             )
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+        # generate output; maximum 200 new tokens
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+            if hasattr(self.model, 'generate_from_batch'):
+                output = self.model.generate_from_batch(
+                    inputs,
+                    GenerationConfig(max_new_tokens=200, stop_strings="<|endoftext|>"),
+                    tokenizer=tokenizer
+                )
+                generated_tokens = output[0, inputs['input_ids'].size(1):]
+            else:
+                input_len = inputs['input_ids'].shape[1]
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=200,
+                    stop_strings=["<|endoftext|>", "<|im_end|>"],
+                    tokenizer=tokenizer
+                )
+                generated_tokens = output[0, input_len:]
 
         # only get generated tokens; decode them to text
-        generated_tokens = output[0, inputs['input_ids'].size(1):]
-        generated_text = self.processor.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+        generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
         # AI2D: map direct answer to letter option
         if dataset in ['AI2D_TEST', 'AI2D_TEST_NO_MASK']:

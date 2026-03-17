@@ -18,6 +18,24 @@ class AfrimedTextQA(TextMCQDataset):
     def supported_datasets(cls):
         return ['AfrimedTextQA']
 
+    def build_prompt(self, line):
+        msgs = super().build_prompt(line)
+
+        cot_clinical_constraints = (
+            "\n\nAct as an expert clinical AI. "
+            "First, step-by-step reason through the clinical presentation and evaluate each option. "
+            "Then, provide your final answer separated by the exact phrase 'FINAL ANSWER: '. "
+            "Your final answer must be exactly one letter corresponding to the correct option (e.g., A, B, C, or D). "
+            "Do NOT include medical disclaimers."
+        )
+
+        for msg in msgs:
+            if msg['type'] == 'text':
+                msg['value'] += cot_clinical_constraints
+                break
+
+        return msgs
+
     def load_data(self, dataset="AfrimedTextQA", **kwargs):
         if (hasattr(self.__class__, "DATASET_URL")
             and dataset in self.__class__.DATASET_URL
@@ -29,30 +47,25 @@ class AfrimedTextQA(TextMCQDataset):
         if not osp.exists(data_path):
             raise FileNotFoundError(f"Dataset file not found: {data_path}")
 
-        return load(data_path)
+        data = load(data_path)
+        if 'question_type' in data.columns:
+            data = data[data['question_type'] == 'MCQ'].reset_index(drop=True)
+        return data
     
 
 
     def evaluate(self, eval_file, **judge_kwargs):
         logger = get_logger('Evaluation')
         logger.info("Starting evaluation for Afrimed Text-Only MCQA...")
-        
+
         from .utils.multiple_choice import (
             report_acc, report_acc_MMT, report_acc_MMSci, mcq_circular_eval, mcq_vanilla_eval
         )
 
-        dataset_map = {
-            'MMBench_TEST_EN': 'MMBench', 'MMBench_TEST_EN_V11': 'MMBench_V11',
-            'MMBench_TEST_CN': 'MMBench_CN', 'MMBench_TEST_CN_V11': 'MMBench_CN_V11'
-        }
         dataset = self.dataset_name
-        if dataset in dataset_map:
-            dataset = dataset_map[dataset]
-
         nproc = judge_kwargs.pop('nproc', 4)
         circular = False
 
-        # Circular protocols for certain datasets
         if listinstr(['mmbench', 'ccbench', 'circular', 'mmcr'], dataset.lower()):
             data = load(eval_file)
             data['index'] = [int(x) for x in data['index']]
@@ -61,10 +74,8 @@ class AfrimedTextQA(TextMCQDataset):
 
         suffix = eval_file.split('.')[-1]
         model = judge_kwargs.get('model', 'exact_matching')
-        assert model in ['chatgpt-0125', 'exact_matching', 'gpt-4-0125']
         name_str_map = {'chatgpt-0125': 'openai', 'gpt-4-0125': 'gpt4'}
         name_str = name_str_map[model] if model in name_str_map else model
-
 
         if model == 'exact_matching':
             model = None
@@ -80,35 +91,49 @@ class AfrimedTextQA(TextMCQDataset):
 
         result_file = eval_file.replace(f'.{suffix}', f'_{name_str}_result.pkl')
 
-
         data = load(eval_file)
         data = data.sort_values(by='index')
-
-
-        if 'question_type' in data.columns:
-            mcq_data = data[data['question_type'] == 'MCQ']
-            saq_data = data[data['question_type'] == 'SAQ']
-        else:
-            mcq_data = data
-            saq_data = pd.DataFrame()
-            
-
         data['prediction'] = [str(x) for x in data['prediction']]
 
+        # Align ground truth metadata
+        meta = self.data
+        if 'question_type' in meta.columns:
+            meta = meta[meta['question_type'] == 'MCQ'].copy()
 
+        # Handle answer column — prefer correct_option in eval file, fall back to meta
         if 'correct_option' in data.columns:
             data['answer'] = data['correct_option']
-
-        def extract_choice(text):
-            match = re.search(r'\b([A-E])\b', str(text).upper())
-            if match:
-                return match.group(1)
-            return "INVALID"
-
-        data['prediction'] = data['prediction'].apply(extract_choice)
+        elif 'answer' not in data.columns and 'correct_option' in meta.columns:
+            data = data.merge(meta[['index', 'correct_option']], on='index', how='left')
+            data['answer'] = data['correct_option']
 
         if 'index' not in data.columns:
             data.reset_index(inplace=True)
+
+        def extract_choice(text):
+            text = str(text).strip()
+
+            match = re.search(r'FINAL ANSWER:\s*\*?\*?([A-E])', text, re.IGNORECASE)
+            if match: return match.group(1).upper()
+
+            match = re.search(r'\*\*(A|B|C|D|E)(?:\.|\*\*)', text)
+            if match: return match.group(1)
+
+            match = re.search(r'answer is (A|B|C|D|E)', text, re.IGNORECASE)
+            if match: return match.group(1).upper()
+
+            match = re.search(r'\b(A|B|C|D|E)\.', text)
+            if match: return match.group(1)
+
+            if text.upper() in ['A', 'B', 'C', 'D', 'E']:
+                return text.upper()
+
+            match = re.match(r'^([A-E])\b', text, re.IGNORECASE)
+            if match: return match.group(1).upper()
+
+            return "INVALID"
+
+        data['prediction'] = data['prediction'].apply(extract_choice)
 
         cols = ['index', 'question', 'prediction', 'answer']
         cols = [c for c in cols if c in data.columns]
@@ -119,17 +144,11 @@ class AfrimedTextQA(TextMCQDataset):
         except Exception:
             print(data[cols].head(10).to_string(index=False))
 
-
-        data = data[data['prediction'].isin(['A', 'B', 'C', 'D', 'E'])]
-
-
+        # Lowercase keys for consistency
         for k in list(data.keys()):
             new_k = k if k in list(string.ascii_uppercase) else k.lower()
             if new_k != k:
                 data[new_k] = data.pop(k)
-
-        meta = self.data
-
 
         if 'correct_option' in meta.columns:
             num_missing_correct = meta['correct_option'].isna().sum()
@@ -137,9 +156,7 @@ class AfrimedTextQA(TextMCQDataset):
         else:
             print("Column 'correct_option' not found in the dataset.")
 
-        mcq_num = (meta['question_type'] == 'MCQ').sum() if 'question_type' in meta.columns else len(meta)
-        print(f"Total number of MCQ questions: {mcq_num}")
-
+        print(f"Total number of MCQ questions: {len(meta)}")
 
         meta_q_map = {x: y for x, y in zip(meta['index'], meta['question'])} if 'index' in meta and 'question' in meta else {}
         data_map = {x: y for x, y in zip(data['index'], data['question'])} if 'index' in data and 'question' in data else {}
@@ -147,7 +164,6 @@ class AfrimedTextQA(TextMCQDataset):
             assert k in meta_q_map, (
                 f'eval_file should be the same as or a subset of dataset {self.dataset_name}'
             )
-
 
         if circular:
             data = mcq_circular_eval(model, data, meta, nproc, result_file, self.dataset_name)
@@ -160,13 +176,11 @@ class AfrimedTextQA(TextMCQDataset):
         dump(data, eval_record)
         data = load(eval_record)
 
-
         if 'answer' in data.columns and 'prediction' in data.columns:
             data['hit'] = [
                 int(str(pred).strip().upper() == str(ans).strip().upper())
                 for pred, ans in zip(data['prediction'], data['answer'])
             ]
-
 
         if 'MMT' in dataset:
             acc = report_acc_MMT(data)
@@ -181,60 +195,15 @@ class AfrimedTextQA(TextMCQDataset):
         dump(acc, score_file)
         print("Score file to be written:", score_file)
 
-        acc_map = {}
+        acc_map = {'main': acc}
+        score_all = acc
 
-
-        if circular and os.environ.get('PRINT_VANILLA', None) == '1':
-            acc_map['circular'] = acc
-
-            data0_all = load(eval_file)
-            data0_all['index'] = [int(x) for x in data0_all['index']]
-            if 'g_index' in data0_all:
-                data0_all['g_index'] = [int(x) for x in data0_all['g_index']]
-                circ0 = data0_all[data0_all['g_index'] == data0_all['index']]
-            else:
-                offset = 1e6
-                circ0 = data0_all[data0_all['index'] <= offset]
-
-            result_file = eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_result.pkl')
-            data0 = mcq_vanilla_eval(model, circ0, meta, nproc, result_file, self.dataset_name)
-            dump(data0, eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_circ0_result.{suffix}'))
-            datac0 = load(eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_circ0_result.{suffix}'))
-            acc_map['vanilla_0'] = report_acc(datac0)
-
-
-            data_all = load(eval_file)
-            dataall = mcq_vanilla_eval(model, data_all, meta, nproc, result_file, self.dataset_name)
-            dump(dataall, eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_all_result.{suffix}'))
-            data_va = load(eval_file.replace(f'.{suffix}', f'_{name_str}_vanilla_all_result.{suffix}'))
-            acc_map['vanilla_all'] = report_acc(data_va)
-
-
-            for k, v in acc_map.items():
-                if 'split' not in v:
-                    v['split'] = [None] * len(v)
-                if len(v) == 1 and pd.isna(v['split'][0]):
-                    v['split'] = [k]
-                else:
-                    assert not pd.isna(v['split'][0])
-                    v['split'] = [k + '_' + sp for sp in v['split']]
-
-            score_all = pd.concat([acc_map['vanilla_0'], acc_map['vanilla_all'], acc_map['circular']])
-
-        else:
-            if 'split' not in acc.columns:
-                acc['split'] = ['test'] * len(acc)
-            acc_map['main'] = acc
-            score_all = acc
-
-        # Append totals to each accuracy table
         total_questions = len(data)
         total_correct = data['hit'].sum() if 'hit' in data.columns else 0
         for acc_df in acc_map.values():
             acc_df['Total_Correct'] = int(total_correct)
             acc_df['Total_Questions'] = int(total_questions)
 
-        # Save detailed per-question results
         full_data_file = eval_file.replace(f'.{suffix}', '_full_data.csv')
         data.to_csv(full_data_file, index=False, encoding='utf-8')
         print(f"Full data written to: {full_data_file}")
@@ -246,14 +215,5 @@ class AfrimedTextQA(TextMCQDataset):
         print("Score file to be written:", score_file)
 
         dump(score_all, score_file)
-
-        if dataset == 'AesBench_VAL':
-            warnings.warn(
-                'AesBench VAL is a toy subset of AesBench TEST. For full results, use AesBench TEST.'
-            )
-        if dataset == 'VisOnlyQA-VLMEvalKit':
-            warnings.warn(
-                'Results differ from the original VisOnlyQA due to split changes and different prompts.'
-            )
 
         return acc

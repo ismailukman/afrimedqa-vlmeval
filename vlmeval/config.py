@@ -597,6 +597,7 @@ qwen_series = {
 }
 
 llava_series = {
+    "llava_med_v1.5_mistral_7b": partial(LLaVA_Med, model_path="microsoft/llava-med-v1.5-mistral-7b"),
     "llava_v1.5_7b": partial(LLaVA, model_path="liuhaotian/llava-v1.5-7b"),
     "llava_v1.5_13b": partial(LLaVA, model_path="liuhaotian/llava-v1.5-13b"),
     "llava_v1_7b": partial(LLaVA, model_path=LLAVA_V1_7B_MODEL_PTH),

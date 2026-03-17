@@ -1,0 +1,19 @@
+{
+    "data": {
+        "source_file": "test_files/ENGLISH_TEST__Sheet1.tsv",
+        "target_file": "test_files/TWI_TEST__Sheet1.tsv",
+        "source_lang": "English",
+        "target_lang": "Twi"
+    },
+    "model": {
+        "type": "hf",
+        "model_name": "google/gemma-3-27b-it",
+        "max_tokens": 512,
+        "temperature": 0.0,
+        "hf_kwargs": {
+            "device_map": "auto",
+            "torch_dtype": "bfloat16"
+        }
+    },
+    "output_dir": "outputs/mt_eval"
+}

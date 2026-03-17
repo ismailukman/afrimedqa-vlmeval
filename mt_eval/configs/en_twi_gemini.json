@@ -1,0 +1,16 @@
+{
+    "data": {
+        "source_file": "test_files/ENGLISH_TEST__Sheet1.tsv",
+        "target_file": "test_files/TWI_TEST__Sheet1.tsv",
+        "source_lang": "English",
+        "target_lang": "Twi"
+    },
+    "model": {
+        "type": "gemini",
+        "model_name": "gemini-2.0-flash",
+        "api_key": "GEMINI_API_KEY",
+        "max_tokens": 512,
+        "temperature": 0.0
+    },
+    "output_dir": "outputs/mt_eval"
+}

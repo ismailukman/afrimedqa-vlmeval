@@ -227,6 +227,70 @@ class LLaVA(BaseModel):
         return output
 
 
+class LLaVA_Med(LLaVA):
+
+    INSTALL_REQ = True
+    INTERLEAVE = True
+
+    def __init__(self, model_path="microsoft/llava-med-v1.5-mistral-7b", **kwargs):
+        super().__init__(model_path=model_path, **kwargs)
+        if "mistral" in model_path.lower():
+            self.conv_mode = "mistral_instruct"
+
+    def generate_inner(self, message, dataset=None):
+        from llava.mm_utils import (
+            process_images,
+            tokenizer_image_token,
+            KeywordsStoppingCriteria,
+        )
+        from llava.constants import IMAGE_TOKEN_INDEX
+        from llava.conversation import conv_templates, SeparatorStyle
+        import copy
+
+        content, images = self.concat_tilist(message)
+        images = [Image.open(s).convert("RGB") for s in images]
+        args = abstractproperty()
+        args.image_aspect_ratio = "pad"
+        if images:
+            image_tensor = process_images(images, self.image_processor, args).to(
+                "cuda", dtype=torch.float16
+            )
+        else:
+            image_tensor = None
+
+        conv = copy.deepcopy(conv_templates[self.conv_mode])
+        conv.messages = list(conv.messages)
+        conv.append_message(conv.roles[0], content)
+        conv.append_message(conv.roles[1], None)
+        prompt = conv.get_prompt()
+
+        input_ids = (
+            tokenizer_image_token(
+                prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+            )
+            .unsqueeze(0)
+            .cuda()
+        )
+
+        stop_str = conv.sep2 if conv.sep_style in (SeparatorStyle.TWO, SeparatorStyle.LLAMA_2) else conv.sep
+        stopping_criteria = KeywordsStoppingCriteria(
+            [stop_str], self.tokenizer, input_ids
+        )
+
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                input_ids,
+                images=image_tensor,
+                stopping_criteria=[stopping_criteria],
+                **self.kwargs,
+            )
+
+        output = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[
+            0
+        ].strip()
+        return output
+
+
 class LLaVA_Next(BaseModel):
 
     INSTALL_REQ = False
